@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/opt/ros/humble/include/**",
+                "/usr/include/opencv4",
+                "/usr/include/opencv4/opencv2/dnn/utils",
+                "/home/dfg/IMCA_WORKSPACE/RM_IMCA_2024/ROS_Debug/install/auto_aim_interfaces/include/auto_aim_interfaces/auto_aim_interfaces/**",
+                "/usr/include/eigen3",
+                "/home/dfg/IMCA_WORKSPACE/RM_IMCA_2024/ROS_Debug/install/auto_aim_interfaces/",
+                "/opt/ros/humble/include/tf2_msgs",
+                "/home/dfg/IMCA_WORKSPACE/RM_IMCA_2024/ROS_Debug/install/auto_aim_interfaces/include/auto_aim_interfaces"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}
