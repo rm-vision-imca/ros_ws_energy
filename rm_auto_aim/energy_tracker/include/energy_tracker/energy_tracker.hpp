@@ -27,10 +27,14 @@ namespace rm_auto_aim
         using Leafs = auto_aim_interfaces::msg::Leafs;
         using Leaf = auto_aim_interfaces::msg::Leaf;
         EnTracker();
+        int tracking_thres;
+        int lost_thres;
+        bool matched=false;
+        Leaf tracked_leaf;
         float angleSolver(auto_aim_interfaces::msg::Leaf leaf);
-        float small_predict(const Leaf &leafs_msg, double dt_);
-        void init(const Leaf &leafs_msg);
-        void update(const Leaf &leafs_msg);
+        float small_predict(const Leaf &leaf, double dt_);
+        void init(const Leaf &leaf);
+        void update(const Leaf &leaf);
         ExtendedKalmanFilter ekf;
         Eigen::VectorXd target_state;
         Eigen::VectorXd measurement;
@@ -43,12 +47,16 @@ namespace rm_auto_aim
         } tracker_state;
         enum Mode
         {
-            NONE=0,
+            NONE = 0,
             AUTOFIRE,
             SMALL,
             BIG,
         };
         int mode_state;
+
+        int detect_count_;
+        int lost_count_;
+
     private:
         void initEKF(const Leaf &a);
     };

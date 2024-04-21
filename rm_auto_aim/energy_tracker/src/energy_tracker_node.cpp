@@ -22,7 +22,6 @@ namespace rm_auto_aim
          // clang-format on
          return F;
       };
-      tracker_->mode_state=EnTracker::SMALL;
       tracker_->ekf = ExtendedKalmanFilter(f);
       // reset srv
       reset_EnTracker_srv_ = this->create_service<std_srvs::srv::Trigger>(
@@ -46,6 +45,8 @@ namespace rm_auto_aim
       // subscriber and filter
       leafs_sub_.subscribe(this, "/detector/leafs", rmw_qos_profile_sensor_data);
       target_frame_ = this->declare_parameter("target_frame", "odom");
+      lost_time_thres_ = this->declare_parameter("tracker.lost_time_thres", 0.6);
+      tracker_->tracking_thres = this->declare_parameter("tracker.tracking_thres", 5);
       tf2_filter_ = std::make_shared<tf2_filter>(
           leafs_sub_, *tf2_buffer_, target_frame_, 10, this->get_node_logging_interface(),
           this->get_node_clock_interface(), std::chrono::duration<int>(1));
@@ -56,161 +57,171 @@ namespace rm_auto_aim
           "/tracker/LeafTarget", rclcpp::SensorDataQoS());
       target_2d_pub_ = this->create_publisher<auto_aim_interfaces::msg::Tracker2D>("entracker/Target2D", rclcpp::SensorDataQoS());
    }
-   float EnergyTrackerNode::monoDirectionalAirResistanceModel(float s, float v, float angle){
-      float z,k=0.01;
-    //t为给定v与angle时的飞行时间
-    float t = (float)((exp(k * s) - 1) / (k * v * cos(angle)));
-    if(t < 0)
-    {
-        //目标点超出最大射程
-        t = 0;
-        return 0;
-    }
-    //z为给定v与angle时的高度
-    z = (float)(v * sin(angle) * t - GRAVITY * t * t / 2);
-    return z;
+   float EnergyTrackerNode::monoDirectionalAirResistanceModel(float s, float v, float angle)
+   {
+      float z, k = 0.01;
+      // t为给定v与angle时的飞行时间
+      float t = (float)((exp(k * s) - 1) / (k * v * cos(angle)));
+      if (t < 0)
+      {
+         // 目标点超出最大射程
+         t = 0;
+         return 0;
+      }
+      // z为给定v与angle时的高度
+      z = (float)(v * sin(angle) * t - GRAVITY * t * t / 2);
+      return z;
    }
 
-   float EnergyTrackerNode::pitchTrajectoryCompensation(float s, float z, float v){
+   float EnergyTrackerNode::pitchTrajectoryCompensation(float s, float z, float v)
+   {
       float z_temp, z_actual, dz;
-    float angle_pitch;
-    z_temp = z;
-    // iteration
-    for (int i = 0; i < 30; i++)
-    {
-        angle_pitch = atan2(z_temp, s); // rad
-        //RCLCPP_INFO(get_logger(),"angle_pitch: %f,z_temp:%f,s:%f",angle_pitch,z_temp,s);
-        z_actual = monoDirectionalAirResistanceModel(s, v, angle_pitch);
-        //RCLCPP_INFO(get_logger(),"z_actual: %f",z_actual);
-
-        if(!z_actual)
-        {
+      float angle_pitch;
+      z_temp = z;
+      // iteration
+      for (int i = 0; i < 30; i++)
+      {
+         angle_pitch = atan2(z_temp, s); // rad
+         z_actual = monoDirectionalAirResistanceModel(s, v, angle_pitch);
+         if (!z_actual)
+         {
             angle_pitch = 0;
             break;
-        }
-        dz = 0.3*(z - z_actual);
-        z_temp = z_temp + dz;
-        if (fabsf(dz) < 0.00001)
-        {
+         }
+         dz = 0.3 * (z - z_actual);
+         z_temp = z_temp + dz;
+         if (fabsf(dz) < 0.00001)
+         {
             break;
-        }
-    }
-    return angle_pitch;
+         }
+      }
+      return angle_pitch;
    }
    void EnergyTrackerNode::LeafsCallback(const auto_aim_interfaces::msg::Leafs::SharedPtr leafs_msg)
    {
-      auto_aim_interfaces::msg::EnTarget target_msg;
-      auto_aim_interfaces::msg::Tracker2D target_msg_2d;
-      if (leafs_msg->leafs.empty()){
-         target_msg.yaw=0;
-         target_msg.pitch=0;
-         target_pub_->publish(target_msg);
-         target_2d_pub_->publish(target_msg_2d);
-         return;
-      }
-      // find the best match leaf
-      auto leaf_ = leafs_msg->leafs[0];
-      tracker_->mode_state=leaf_.mode;
+      tracker_->mode_state = leafs_msg->mode;
       for (auto &leaf : leafs_msg->leafs)
       {
-         if (leaf_.prob > leaf.prob)
+         // tf2 transform
+         geometry_msgs::msg::PoseStamped ps;
+         ps.header = leafs_msg->header;
+         ps.pose = leaf.pose;
+         try
          {
-            leaf_ = leaf;
+            leaf.pose = tf2_buffer_->transform(ps, target_frame_).pose;
+         }
+         catch (const tf2::ExtrapolationException &ex)
+         {
+            RCLCPP_ERROR(get_logger(), "Error while transforming %s", ex.what());
+            return;
          }
       }
-      geometry_msgs::msg::PoseStamped ps;
-      ps.header = leafs_msg->header;
-      ps.pose = leaf_.pose;
-      if (!leaf_.type)
-         return;
-      try
+      // Filter invalid leafs
+      leafs_msg->leafs.erase(
+          std::remove_if(
+              leafs_msg->leafs.begin(), leafs_msg->leafs.end(),
+              [this](const auto_aim_interfaces::msg::Leaf &leaf)
+              {
+                 return !leaf.is_valid;
+              }),
+          leafs_msg->leafs.end());
+
+      if (!leafs_msg->leafs.empty())
       {
-         leaf_.pose = tf2_buffer_->transform(ps, target_frame_).pose;
-         //RCLCPP_INFO(get_logger(),"odom x:%f y:%f z:%f ",leaf_.pose.position.x,leaf_.pose.position.y,leaf_.pose.position.z);
-         
+         double max_prob = -1;
+         tracker_->tracked_leaf = leafs_msg->leafs[0];
+         for (const auto &leaf : leafs_msg->leafs)
+         {
+            if (leaf.prob > max_prob)
+            {
+               max_prob = leaf.prob;
+               tracker_->tracked_leaf = leaf;
+            }
+         }
+         angle1 = tracker_->angleSolver(tracker_->tracked_leaf);
+         if (angle1 != 0)
+         {
+            angle0 = tracker_->angleSolver(tracker_->tracked_leaf);
+            rad_destation = angle1 - angle0 < 0 ? 1 : -1;
+         }
+         tracker_->matched=true;
       }
-      catch (const tf2::ExtrapolationException &ex)
-      {
-         RCLCPP_ERROR(get_logger(), "Error while transforming %s", ex.what());
-         return;
-      }
+      else tracker_->matched=false;
 
       // Init message
-      // auto_aim_interfaces::msg::TrackerInfo info_msg;
-      
+      auto_aim_interfaces::msg::EnTarget target_msg;
+      auto_aim_interfaces::msg::Tracker2D target_msg_2d;
       rclcpp::Time time = leafs_msg->header.stamp;
       target_msg.header.stamp = time;
       target_msg.header.frame_id = target_frame_;
-      float angle_;
-      // small predict
-      if (tracker_->mode_state == EnTracker::SMALL)
+      
+
+      // small_predict
+      if (tracker_->mode_state == EnTracker::SMALL && rad_destation != 0)
       {
-         if (tracker_->tracker_state == EnTracker::LOST)
-         {
-            angle0 = tracker_->angleSolver(leaf_);
-            last_time_ = time;
-            tracker_->tracker_state = EnTracker::TRACKING;
-            return;
-         }
-         dt_ = (time.seconds() - last_time_.seconds());
-         if (rad_destation == 0)
-            {
-               rad_destation = angle1 - angle0 < 0 ? 1 : -1;
-            //RCLCPP_INFO(get_logger(),"rad: %d",rad_destation);
-            }
-         //RCLCPP_INFO(get_logger(),"small pre");
-         //angle_ = tracker_->small_predict(leaf_, dt_);
-         angle_ = tracker_->angleSolver(leaf_);
+         angle_ = tracker_->angleSolver(tracker_->tracked_leaf);
+         // after solved
+         Eigen::Vector2d p1(tracker_->tracked_leaf.leaf_center.x, tracker_->tracked_leaf.leaf_center.y);
+         Eigen::Vector2d p2(tracker_->tracked_leaf.r_center.x, tracker_->tracked_leaf.r_center.y);
+         float r_distance = (p1 - p2).norm();
+         target_msg_2d.x = tracker_->tracked_leaf.r_center.x + r_distance * cos(angle_) * rad_destation;
+         target_msg_2d.y = tracker_->tracked_leaf.r_center.y + r_distance * sin(angle_) * rad_destation;
+         float x_ratio = tracker_->tracked_leaf.leaf_center.x / target_msg_2d.x, y_ratio = tracker_->tracked_leaf.leaf_center.y / target_msg_2d.y;
+         target_msg.position.x = tracker_->tracked_leaf.pose.position.x;
+         target_msg.position.y = tracker_->tracked_leaf.pose.position.y * x_ratio;
+         target_msg.position.z = tracker_->tracked_leaf.pose.position.z * y_ratio;
+         target_msg.angle = angle_;
+         target_msg.yaw = atan2(target_msg.position.y, target_msg.position.x);
+         float bottom_len = sqrt(pow(target_msg.position.x, 2.0) + pow(target_msg.position.y, 2.0));
+         target_msg.pitch = pitchTrajectoryCompensation(bottom_len, target_msg.position.z, v);
       }
       // big predict
-      else if (tracker_->mode_state == EnTracker::BIG)
+      else if (tracker_->mode_state == EnTracker::BIG && rad_destation != 0)
       {
-         // Update tracker
+         // Update Entracker
          if (tracker_->tracker_state == EnTracker::LOST)
          {
-            tracker_->init(leaf_);
-            angle0 = tracker_->angleSolver(leaf_);
-            //RCLCPP_INFO(this->get_logger(), "angle0:%f", angle0);
-            last_time_ = time;
-            tracker_->tracker_state = EnTracker::TRACKING;
-            return;
-         }
-         angle1 = tracker_->angleSolver(leaf_);
-         if (rad_destation == 0)
-         {
-            rad_destation = angle1 - angle0 < 0 ? 1 : -1;
-            //RCLCPP_INFO(this->get_logger(), "angle1:%f", angle1);
-         }
-         dt_ = (time.seconds() - last_time_.seconds()) ;
-         tracker_->ekf.t = dt_;
-         tracker_->update(leaf_);
-         const auto &state = tracker_->target_state;
-         angle_ = state(0);
-         //float angle_v = state(1);
-         //RCLCPP_INFO(rclcpp::get_logger("energy_tracker"), "predict angle:%f,angle_v:%f,dt_:%f", angle_ * 180 / M_PI, angle_v * tracker_->ekf.t, dt_);
-      }
-      else
-         angle_ = tracker_->angleSolver(leaf_);
-      Eigen::Vector2d p1(leaf_.leaf_center.x, leaf_.leaf_center.y);
-      Eigen::Vector2d p2(leaf_.r_center.x, leaf_.r_center.y);
-      float r_distance = (p1 - p2).norm();
-      target_msg_2d.x = leaf_.r_center.x + r_distance * cos(angle_) * rad_destation;
-      target_msg_2d.y = leaf_.r_center.y + r_distance * sin(angle_) * rad_destation;
-      float x_ratio=leaf_.leaf_center.x/target_msg_2d.x,y_ratio=leaf_.leaf_center.y/target_msg_2d.y;
-      //RCLCPP_INFO(rclcpp::get_logger("energy_tracker"),"x_ratio:%f,y_ratio:%f",x_ratio,y_ratio);
-      target_msg.position.x = leaf_.pose.position.x;
-      target_msg.position.y = leaf_.pose.position.y*x_ratio;
-      target_msg.position.z = leaf_.pose.position.z*y_ratio;
-      target_msg.angle = angle_;
-      //RCLCPP_INFO(rclcpp::get_logger("energy_tracker"), "predict x: %f,predict y: %f,predict z: %f", target_msg.position.x, target_msg.position.y,target_msg.position.z);
-      
-      target_msg.yaw = atan2(target_msg.position.y, target_msg.position.x);
-      float bottom_len = sqrt(pow(target_msg.position.x, 2.0) + pow(target_msg.position.y, 2.0));
-      //target_msg.pitch = atan2(target_msg.position.y, bottom_len); //   pitch angle
-      target_msg.pitch =pitchTrajectoryCompensation(bottom_len,target_msg.position.z,v);
-      last_time_ = time;
-      RCLCPP_INFO(rclcpp::get_logger("energy_tracker"), "y:%f,x:%f,yaw:%f,pitch:%f",target_msg.position.y,target_msg.position.x,target_msg.yaw,target_msg.pitch);
 
+            tracker_->init(tracker_->tracked_leaf);
+            angle1 = tracker_->angleSolver(tracker_->tracked_leaf);
+            target_msg.tracking = false;
+         }
+         else
+         {
+            angle0 = tracker_->angleSolver(tracker_->tracked_leaf);
+            dt_ = (time.seconds() - last_time_.seconds());
+            tracker_->lost_thres = static_cast<int>(lost_time_thres_ / dt_);
+            tracker_->update(tracker_->tracked_leaf);
+            if (tracker_->tracker_state == EnTracker::DETECTING)
+            {
+               target_msg.tracking = false;
+            }
+            else if (tracker_->tracker_state == EnTracker::TRACKING ||
+                     tracker_->tracker_state == EnTracker::TEMP_LOST)
+            {
+               target_msg.tracking = true;
+               const auto &state = tracker_->target_state;
+               angle_ = state(0);
+
+               // after solved
+               Eigen::Vector2d p1(tracker_->tracked_leaf.leaf_center.x, tracker_->tracked_leaf.leaf_center.y);
+               Eigen::Vector2d p2(tracker_->tracked_leaf.r_center.x, tracker_->tracked_leaf.r_center.y);
+               float r_distance = (p1 - p2).norm();
+               target_msg_2d.x = tracker_->tracked_leaf.r_center.x + r_distance * cos(angle_) * rad_destation;
+               target_msg_2d.y = tracker_->tracked_leaf.r_center.y + r_distance * sin(angle_) * rad_destation;
+               float x_ratio = tracker_->tracked_leaf.leaf_center.x / target_msg_2d.x, y_ratio = tracker_->tracked_leaf.leaf_center.y / target_msg_2d.y;
+               target_msg.position.x = tracker_->tracked_leaf.pose.position.x;
+               target_msg.position.y = tracker_->tracked_leaf.pose.position.y * x_ratio;
+               target_msg.position.z = tracker_->tracked_leaf.pose.position.z * y_ratio;
+               target_msg.angle = angle_;
+               target_msg.yaw = atan2(target_msg.position.y, target_msg.position.x);
+               float bottom_len = sqrt(pow(target_msg.position.x, 2.0) + pow(target_msg.position.y, 2.0));
+               target_msg.pitch = pitchTrajectoryCompensation(bottom_len, target_msg.position.z, v);
+            }
+         }
+      }
+      last_time_ = time;
+      RCLCPP_INFO(rclcpp::get_logger("energy_tracker"), "y:%f,x:%f,yaw:%f,pitch:%f", target_msg.position.y, target_msg.position.x, target_msg.yaw, target_msg.pitch);
       target_pub_->publish(target_msg);
       target_2d_pub_->publish(target_msg_2d);
    }

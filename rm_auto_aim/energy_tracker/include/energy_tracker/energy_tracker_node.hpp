@@ -33,7 +33,10 @@ namespace rm_auto_aim
     void LeafsCallback(const auto_aim_interfaces::msg::Leafs::SharedPtr leafs_msg);
     const float v=28.0;
     const float GRAVITY=9.778;
-    float angle0,angle1;
+    
+    double lost_time_thres_;
+    float angle0=0,angle1=0;
+    float angle_;
     float pitchTrajectoryCompensation(float s, float z, float v);
     float monoDirectionalAirResistanceModel(float s, float v, float angle);
     // The time when the last message was received

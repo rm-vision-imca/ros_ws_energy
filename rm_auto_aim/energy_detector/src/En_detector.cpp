@@ -214,7 +214,7 @@ namespace rm_auto_aim
         keypoints_center = cv::Point2f(x0 + leaf.rect.width / 2, y0 + leaf.rect.height / 2);
       }
       leaf.kpt.emplace_back(keypoints_center);
-      leaf.leaf_type = true;
+      leaf.is_valid = true;
       for (size_t i = 0; i < leaf.kpt.size(); i++)
       {
         if (
@@ -223,7 +223,7 @@ namespace rm_auto_aim
             R_Point.x > MAX_WIDTH or R_Point.y > MAX_HEIGHT)
         {
 
-          leaf.leaf_type = false;
+          leaf.is_valid = false;
           break;
         }
       }

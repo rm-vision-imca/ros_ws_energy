@@ -23,7 +23,7 @@ namespace rm_auto_aim
         cv::Rect_<float> rect;
         int label;
         float prob;
-        bool leaf_type;
+        bool is_valid;
         /*
         @param [0]top_left
         @param [1]bottom_left

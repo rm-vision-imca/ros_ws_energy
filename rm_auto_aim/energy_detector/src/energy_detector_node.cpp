@@ -87,7 +87,7 @@ namespace rm_auto_aim
       leaf_msg.pose.position.x = leaf.kpt[4].x;
       leaf_msg.pose.position.y = leaf.kpt[4].y;
       leaf_msg.pose.position.z = 0;
-      leaf_msg.type = leaf.leaf_type;
+      leaf_msg.is_valid = leaf.is_valid;
       // R info
       leaf_msg.r_center.x = detector_->R_Point.x;
       leaf_msg.r_center.y = detector_->R_Point.y; // y-->x
@@ -105,6 +105,7 @@ namespace rm_auto_aim
     if (pnp_solver_ != nullptr)
     {
       leafs_msg_.header = img_msg->header;
+      leafs_msg_.mode=detector_->detect_mode;
       leafs_msg_.leafs.clear();
       leaf_marker_.id = 0;
       text_marker_.id = 0;
@@ -125,9 +126,8 @@ namespace rm_auto_aim
         // prob
         leaf_msg.prob = leaf.prob;
         // type
-        leaf_msg.type = leaf.leaf_type;
-        // leaf mode
-        leaf_msg.mode=detector_->detect_mode;
+        leaf_msg.is_valid = leaf.is_valid;
+        
         // debug leafs
         debug_leaf.label = leaf.label;
         debug_leaf.r_center.x = detector_->R_Point.x;

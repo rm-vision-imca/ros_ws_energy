@@ -4,3 +4,4 @@ float32 h_error
 float32 angle
 float32 yaw 
 float32 pitch
+bool tracking
